@@ -1,0 +1,10 @@
+/.env
+/.venv/
+/.venv-cpu/
+__pycache__/
+*.pyc
+/logs/*.log
+/models/
+/runtime/
+*.log
+!logs/.gitkeep

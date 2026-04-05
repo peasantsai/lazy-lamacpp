@@ -1,42 +1,49 @@
-# llama.cpp model stack
+# vLLM model stack
 
-Systemd-first orchestration for a small local LLM stack built on `llama.cpp`.
+Systemd-first orchestration for a small local model stack built on `vLLM`.
 
-This repository treats `make` as the primary operator interface and user-level
-`systemd` as the primary runtime. It provisions five independently managed
-services for embeddings, dense generation, sparse extraction, reranking, and
-coding workloads. Each model can be downloaded, configured, started, stopped,
-sampled, and replaced on its own, and the same repo can also manage the full
-stack when the host has enough resources.
+This repository mirrors the operator contract of `../llama-cpp-models`: `make`
+is the primary control surface, user-level `systemd` is the primary runtime,
+tracked defaults live in `config/`, mutable local overrides live in `runtime/`,
+and each model can be downloaded, configured, started, stopped, sampled, and
+replaced independently.
 
 ## What this repo does
 
-- Builds `llama.cpp` locally with CPU BLAS support and CUDA when `nvcc` is available.
-- Installs user-level `systemd` units for long-running model services.
-- Downloads GGUF checkpoints from Hugging Face using a token stored in `.env`.
+- Installs CUDA `vLLM` into `.venv` and CPU `vLLM` into `.venv-cpu`.
+- Installs templated user-level `systemd` units for long-running model services.
+- Downloads model snapshots from Hugging Face using the token stored in `.env`.
 - Keeps tracked defaults in `config/` and writes mutable overrides to `runtime/config/`.
 - Exposes a `make` interface for lifecycle control, model replacement, LoRA activation, and sample requests.
-- Logs every `make` action to `logs/<target>-<timestamp>.log` while still streaming output to the terminal.
+- Logs every top-level `make` action to `logs/<target>-<timestamp>.log` while still streaming output to the terminal.
 
 ## Model catalog
 
 | Model | Role | Default endpoint | Default port | Default device | Allowed devices | Default context | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `embeddings` | `google/embeddinggemma-300m` via `ggml-org/embeddinggemma-300M-GGUF` | `/v1/embeddings` | `8101` | `cpu` | `cpu` | `2048` | Embedding-only service with `cls` pooling. |
-| `dense` | `Qwen/Qwen2.5-7B-Instruct-AWQ` mapped to `Qwen/Qwen2.5-7B-Instruct-GGUF` | `/v1/chat/completions` | `8102` | `gpu` | `cpu,gpu` | `8192` | Main reasoning and extraction model. Supports dynamic LoRA loading. |
-| `sparse` | `HuggingFaceTB/SmolLM2-1.7B-Instruct` via `HuggingFaceTB/SmolLM2-1.7B-Instruct-GGUF` | `/v1/chat/completions` | `8103` | `gpu` | `cpu,gpu` | `8192` | Fast low-latency extraction and lightweight generation. |
-| `reranker` | `BAAI/bge-reranker-v2-m3` via `gpustack/bge-reranker-v2-m3-GGUF` | `/v1/rerank` | `8104` | `gpu` | `cpu,gpu` | `8192` | Cross-encoder reranking service. |
-| `coding` | `Jackrong/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled-v2-GGUF` | `/v1/chat/completions` | `8105` | `cpu` | `cpu,gpu` | `8192` | Coding model. GPU mode is supported, but defaults to conservative partial offload on this host. |
+| `embeddings` | `google/embeddinggemma-300m` | `/v1/embeddings` | `8101` | `gpu` | `cpu,gpu` | `2048` | Pooling model served with `--runner pooling`. |
+| `dense` | `Qwen/Qwen2.5-3B-Instruct-AWQ` | `/v1/chat/completions` | `8102` | `gpu` | `gpu` | `8192` | Main reasoning and extraction model. Supports optional LoRA adapters. |
+| `sparse` | `HuggingFaceTB/SmolLM2-1.7B-Instruct` | `/v1/chat/completions` | `8103` | `gpu` | `cpu,gpu` | `3584` | Fast low-latency extraction and lightweight generation. Context is reduced on this 6 GiB GPU for stable startup. |
+| `reranker` | `BAAI/bge-reranker-v2-m3` | `/v1/rerank` | `8104` | `gpu` | `cpu,gpu` | `8192` | Pooling model served with `--runner pooling`. |
+| `coding` | `Qwen/Qwen2.5-Coder-1.5B-Instruct-AWQ` | `/v1/chat/completions` | `8105` | `gpu` | `gpu` | `8192` | Coding-focused generation model. |
+
+The repo keeps the same five-role layout as the `llama.cpp` stack. The default
+checkpoint choices are adapted to `vLLM` rather than GGUF, so two practical
+differences matter:
+
+- `dense` and `coding` default to smaller AWQ checkpoints and are GPU-only out of the box on this host.
+- CPU mode for compatible checkpoints is backed by the separate `.venv-cpu` install, while the tracked defaults stay tuned for the CUDA path on this host.
+- `sparse` keeps the same role and model family as the source repo, but its tracked context limit is reduced to `3584` to fit stable vLLM startup on a 6 GiB laptop GPU.
 
 ## Architecture
 
-The control flow is simple:
+The control flow stays intentionally close to the source repo:
 
 1. `make` targets call shell helpers in `scripts/`.
 2. Model defaults come from `config/models/*.env`.
 3. Mutable overrides are written to `runtime/config/*.env`.
-4. `systemd` starts `scripts/run-llama-server.sh <model>`.
-5. `run-llama-server.sh` resolves the effective config and launches `llama-server`.
+4. `systemd` starts `scripts/run-vllm-server.sh <model>`.
+5. `run-vllm-server.sh` resolves the effective config and launches `vllm serve`.
 
 The repository is intentionally systemd-first. Docker is not the primary runtime
 path here.
@@ -69,13 +76,20 @@ cp .env.example .env
 make env-token HF_TOKEN=hf_your_token
 ```
 
-The current `.env.example` contains:
+The checked-in `.env.example` contains:
 
 ```bash
 HF_TOKEN=
 HF_HOME=${HOME}/.cache/huggingface
 HF_HUB_ENABLE_HF_TRANSFER=1
+VLLM_PYTHON_VERSION=3.12
+VLLM_CPU_PYTHON_VERSION=3.12
+VLLM_CPU_VERSION=0.19.0
+VLLM_CPU_PACKAGE_URL=
 ```
+
+This working tree already includes the copied `.env` from
+`../llama-cpp-models/.env`, as requested.
 
 ### 2. Install prerequisites
 
@@ -85,11 +99,10 @@ make install-prereqs
 
 This target:
 
-- installs OS packages such as `cmake`, `ninja-build`, `OpenBLAS`, `python3-venv`, `curl`, and `jq`
-- creates `.venv`
-- installs `huggingface_hub[cli]` and `nvitop`
-- clones or updates `vendor/llama.cpp`
-- builds `llama.cpp`
+- installs OS packages such as `build-essential`, `python3-venv`, `curl`, `git`, and `jq`
+- installs `uv` when it is missing
+- provisions `.venv` for the CUDA build and `.venv-cpu` for the CPU build
+- installs the configured CUDA `vllm`, the official x86 CPU `vllm` wheel, `huggingface_hub[cli]`, and `nvitop`
 - refreshes the user `systemd` units
 
 ### 3. Download model files
@@ -116,11 +129,11 @@ make systemd-install
 
 This links:
 
-- `systemd/user/llamacpp-model@.service`
-- `systemd/user/llamacpp-stack.target`
+- `systemd/user/vllm-model@.service`
+- `systemd/user/vllm-stack.target`
 
 into `~/.config/systemd/user/` and writes the project root to
-`~/.config/llama-cpp-models/project.env`.
+`~/.config/vllm-models/project.env`.
 
 ### 5. Start models
 
@@ -128,11 +141,21 @@ Examples:
 
 ```bash
 make start MODEL=embeddings
-make start MODEL=dense DEVICE=gpu
-make start MODEL=sparse DEVICE=gpu
-make start MODEL=reranker DEVICE=gpu
-make start MODEL=coding DEVICE=cpu
+make start MODEL=dense
+make start MODEL=sparse
+make start MODEL=reranker
+make start MODEL=coding
 ```
+
+If you need to flip a compatible model to CPU mode:
+
+```bash
+make start MODEL=embeddings DEVICE=cpu
+make start MODEL=reranker DEVICE=cpu
+make start MODEL=sparse DEVICE=cpu
+```
+
+CPU requests use `.venv-cpu`, while GPU requests use `.venv`.
 
 ## Primary commands
 
@@ -161,8 +184,8 @@ make restart-all
 ### Configuration and replacement
 
 ```bash
-make configure MODEL=dense DEVICE=gpu GPU_LAYERS=99 CTX_SIZE=8192
-make replace MODEL=sparse HF_REPO=HuggingFaceTB/SmolLM2-360M-Instruct-GGUF HF_FILE=smollm2-360m-instruct-q4_k_m.gguf
+make configure MODEL=dense GPU_MEMORY_UTILIZATION=0.80 CTX_SIZE=8192
+make replace MODEL=sparse HF_REPO=HuggingFaceTB/SmolLM2-360M-Instruct
 make env-token HF_TOKEN=hf_your_new_token
 ```
 
@@ -178,8 +201,9 @@ make test-sequence
 ### Dense LoRA workflow
 
 ```bash
-make lora-config MODEL=dense LORA=cypher HF_REPO=org/cypher-lora HF_FILE=adapter.gguf ENABLED=true
+make lora-config MODEL=dense LORA=cypher HF_REPO=org/cypher-lora ENABLED=true
 make lora-download MODEL=dense LORA=cypher
+make restart MODEL=dense
 make lora-activate MODEL=dense LORAS=cypher,policy
 make lora-deactivate MODEL=dense
 ```
@@ -210,20 +234,25 @@ The Makefile supports these per-model override inputs:
 | `DEVICE` | `MODEL_DEVICE` | `cpu` or `gpu` |
 | `PORT` | `MODEL_PORT` | HTTP port for the service |
 | `HOST` | `MODEL_HOST` | bind address |
-| `CTX_SIZE` or `N_CTX` | `CONTEXT_SIZE` | llama.cpp context size |
-| `THREADS` | `THREADS` | CPU thread count |
-| `GPU_LAYERS` | `GPU_LAYERS` | number of offloaded layers |
-| `CPU_BATCH` | `CPU_BATCH` | batch size for CPU mode |
-| `CPU_UBATCH` | `CPU_UBATCH` | ubatch size for CPU mode |
-| `GPU_BATCH` | `GPU_BATCH` | batch size for GPU mode |
-| `GPU_UBATCH` | `GPU_UBATCH` | ubatch size for GPU mode |
-| `DISPLAY_NAME` | `MODEL_DISPLAY_NAME` | human-readable model label |
+| `CTX_SIZE` or `N_CTX` | `CONTEXT_SIZE` | `vLLM` max model length |
+| `THREADS` | `THREADS` | CPU thread count for compatible CPU runs |
+| `DISPLAY_NAME` | `MODEL_DISPLAY_NAME` | served model name |
 | `SOURCE_REPO` | `MODEL_SOURCE_REPO` | upstream reference repo |
-| `HF_REPO` | `MODEL_REPO` | GGUF repo used for download |
-| `HF_FILE` | `MODEL_FILENAME` | entry GGUF file |
-| `HF_PATTERN` | `MODEL_INCLUDE_PATTERN` | Hugging Face download pattern |
+| `HF_REPO` | `MODEL_REPO` | Hugging Face repo used for download |
+| `HF_FILE` | `MODEL_ENTRYPOINT` | optional file or directory entry to verify after download |
+| `HF_PATTERN` | `MODEL_INCLUDE_PATTERN` | optional comma-separated download patterns |
 | `HF_REVISION` | `MODEL_REVISION` | branch, tag, or revision |
-| `EXTRA_ARGS` | `SERVER_EXTRA_ARGS` | extra `llama-server` arguments |
+| `DTYPE` | `DTYPE` | requested `vLLM` dtype |
+| `QUANTIZATION` | `QUANTIZATION` | requested `vLLM` quantization mode |
+| `GPU_MEMORY_UTILIZATION` | `GPU_MEMORY_UTILIZATION` | `vLLM` GPU cache budget |
+| `SWAP_SPACE` | `SWAP_SPACE` | Retained for config compatibility with the source repo; current `vllm serve` on this host does not consume it directly |
+| `TENSOR_PARALLEL_SIZE` | `TENSOR_PARALLEL_SIZE` | tensor parallel degree |
+| `MAX_NUM_SEQS` | `MAX_NUM_SEQS` | concurrent sequence slots |
+| `MAX_NUM_BATCHED_TOKENS` | `MAX_NUM_BATCHED_TOKENS` | scheduler batch budget |
+| `ENABLE_PREFIX_CACHING` | `ENABLE_PREFIX_CACHING` | `true` or `false` |
+| `TRUST_REMOTE_CODE` | `TRUST_REMOTE_CODE` | `true` or `false` |
+| `CPU_KV_CACHE_GB` | `CPU_KV_CACHE_GB` | CPU kv-cache budget for compatible CPU runs |
+| `EXTRA_ARGS` | `SERVER_EXTRA_ARGS` | extra `vllm serve` arguments |
 
 Use `make show MODEL=<name>` to inspect the resolved runtime values.
 
@@ -234,18 +263,18 @@ Device switching is per model and persistent once written.
 - `make start MODEL=<name> DEVICE=cpu` updates the runtime override and starts the service in CPU mode.
 - `make start MODEL=<name> DEVICE=gpu` updates the runtime override and starts the service in GPU mode.
 - `make restart MODEL=<name> DEVICE=...` behaves the same way.
-- Runtime batch, ubatch, and `-ngl` are chosen from the model's CPU or GPU profile.
 
-Current defaults:
+Current defaults are GPU-first because this repo is tuned around a CUDA-capable
+`vLLM` install on this host:
 
-- `embeddings` is CPU-only.
-- `dense` defaults to GPU.
-- `sparse` defaults to GPU.
-- `reranker` defaults to GPU.
-- `coding` defaults to CPU on this host because the `Q4_K_M` file is large enough that full offload is not a safe default on a 6 GiB laptop GPU.
+- `embeddings` defaults to GPU, but can be switched to CPU.
+- `dense` defaults to GPU and ships with a GPU-only AWQ checkpoint.
+- `sparse` defaults to GPU, but can be switched to CPU.
+- `reranker` defaults to GPU, but can be switched to CPU.
+- `coding` defaults to GPU and ships with a GPU-only AWQ checkpoint.
 
-`make start-all` exists, but it starts all declared services at once. On smaller
-single-GPU hosts, the sequential flows are usually the practical choice:
+`make start-all` exists, but it starts all declared services at once. On a
+single 6 GiB laptop GPU, the sequential flows are usually the practical choice:
 
 - `make sample-all`
 - `make test-sequence`
@@ -253,28 +282,26 @@ single-GPU hosts, the sequential flows are usually the practical choice:
 ## Model replacement
 
 Use `make replace` when you want to swap a configured model to another Hugging
-Face repo or file and download it immediately.
+Face repo and download it immediately.
 
 Example:
 
 ```bash
 make replace \
   MODEL=dense \
-  HF_REPO=Qwen/Qwen2.5-7B-Instruct-GGUF \
-  HF_FILE=qwen2.5-7b-instruct-q5_k_m-00001-of-00002.gguf \
-  HF_PATTERN=qwen2.5-7b-instruct-q5_k_m-*.gguf
+  HF_REPO=Qwen/Qwen2.5-14B-Instruct-AWQ \
+  HF_PATTERN='*.json,*.safetensors,*.model,*.py,*.txt'
 ```
 
 Notes:
 
-- `HF_FILE` is the exact filename `llama-server` will use at runtime.
-- `HF_PATTERN` controls which files `snapshot_download()` pulls.
-- Split GGUF models must use a pattern that matches all shards.
+- `HF_REPO` is the actual model snapshot used for download.
+- `HF_PATTERN` is optional. Leave it empty to download the full repo.
+- `HF_FILE` is no longer a GGUF filename. Here it is only an optional existence check for a known file inside the snapshot, such as `config.json` or `adapter_config.json`.
 
 ## Dense LoRA management
 
-The `dense` model can preload multiple LoRAs and activate them dynamically
-through the `llama-server` LoRA adapter endpoint.
+The `dense` model can load PEFT-style LoRA adapters through `vLLM`.
 
 Tracked manifest:
 
@@ -291,7 +318,7 @@ Available logical LoRA slots:
 Typical flow:
 
 ```bash
-make lora-config MODEL=dense LORA=extract HF_REPO=org/extract-lora HF_FILE=adapter.gguf ENABLED=true
+make lora-config MODEL=dense LORA=extract HF_REPO=org/extract-lora ENABLED=true
 make lora-download MODEL=dense LORA=extract
 make restart MODEL=dense
 make lora-activate MODEL=dense LORAS=extract
@@ -299,11 +326,15 @@ make lora-activate MODEL=dense LORAS=extract
 
 What the commands do:
 
-- `lora-config` writes repo, filename, revision, scale, and enabled state to the local LoRA override file.
-- `lora-download` downloads the LoRA GGUF into `models/dense/loras/<name>/`.
-- `restart` is needed so the service preloads enabled local LoRA files.
-- `lora-activate` posts the active scales to `/lora-adapters`.
-- `lora-deactivate` sets all active scales to zero.
+- `lora-config` writes repo, revision, expected file, pattern, scale, and enabled state to the local LoRA override file.
+- `lora-download` downloads the adapter snapshot into `models/dense/loras/<name>/`.
+- `restart` reloads the service so previously selected adapters are exposed on startup.
+- `lora-activate` persists the active adapter list and, when the service is already running, uses `vLLM`'s runtime LoRA API to load or unload adapters immediately.
+- `lora-deactivate` clears the persisted active list and unloads adapters from the running service when possible.
+
+This is the closest `vLLM` analogue to the dynamic LoRA workflow in the
+`llama.cpp` stack. The important behavioral difference is that adapters are
+requested by model name in `vLLM`, not by a global server-side scale list.
 
 ## Sample requests and metrics
 
@@ -366,7 +397,7 @@ Metrics reported by service type:
 
 ## Logging and observability
 
-There are two log layers:
+There are two log layers.
 
 ### Make command logs
 
@@ -388,14 +419,14 @@ The same output is shown in the terminal while the file is being written.
 
 ### Service runtime logs
 
-The `systemd` units send `llama-server` stdout and stderr to the journal.
+The `systemd` units send `vLLM` stdout and stderr to the journal.
 
 Use:
 
 ```bash
 make logs MODEL=dense
 make logs-all
-journalctl --user -u llamacpp-model@dense.service -f
+journalctl --user -u vllm-model@dense.service -f
 ```
 
 `make start` and `make restart` also print a post-start `systemctl status`
@@ -406,37 +437,39 @@ journal lines.
 
 Main unit:
 
-- `systemd/user/llamacpp-model@.service`
+- `systemd/user/vllm-model@.service`
 
 Stack target:
 
-- `systemd/user/llamacpp-stack.target`
+- `systemd/user/vllm-stack.target`
 
 The model service uses:
 
 - `Restart=on-failure`
 - `RestartSec=5`
-- `TimeoutStartSec=120`
+- `TimeoutStartSec=1800`
 - `KillSignal=SIGINT`
 
 Each model is started with:
 
 ```bash
-scripts/run-llama-server.sh <model>
+scripts/run-vllm-server.sh <model>
 ```
 
-which resolves the final config and launches `llama-server` with the correct:
+which resolves the final config and launches `vllm serve` with the correct:
 
 - host
 - port
-- model path
-- context size
-- threads
-- batch and ubatch
-- parallel request slots
-- GPU layers
-- server mode flags such as `--embedding` or `--reranking`
-- optional LoRA preload arguments
+- served model name
+- local snapshot path
+- max model length
+- device
+- tensor parallel size
+- dtype and quantization settings
+- scheduler budgets
+- optional prefix caching
+- optional pooling task flags such as `embed` or `score`
+- optional LoRA module arguments
 
 ## Hugging Face authentication
 
@@ -453,7 +486,9 @@ Optional related environment values:
 - `HF_HOME`
 - `HF_HUB_ENABLE_HF_TRANSFER`
 - `HF_PYTHON_BIN`
-- `LLAMA_SERVER_BIN`
+- `VLLM_BIN`
+- `VLLM_PYTHON_VERSION`
+- `VLLM_PACKAGE`
 
 `HF_REPO`, `HF_FILE`, `HF_PATTERN`, and `HF_REVISION` are per-model settings,
 not global environment variables.
@@ -468,14 +503,14 @@ This repository was tuned on a machine with:
 - 30 GiB system RAM
 - NVIDIA RTX 3060 Laptop GPU with 6 GiB VRAM
 
-That is enough for the default split here, but not enough headroom to assume all
-GPU-oriented services should run concurrently.
+That is enough for the default split here, but not enough headroom to assume
+all GPU-oriented services should run concurrently.
 
 ## Compatibility notes
 
-- `llama.cpp` serves GGUF checkpoints, not raw AWQ or standard Transformers weights.
-- The `dense` service therefore uses the GGUF mapping of the requested Qwen AWQ model.
-- The `embeddings` service is configured to the current local runtime setting of `2048` context, not the upstream marketing maximum.
+- `vLLM` serves Hugging Face model snapshots, not GGUF-only checkpoints.
+- Pooling workloads are handled through the `embed` and `score` tasks.
+- Runtime LoRA loading requires `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`, which this repo exports only for LoRA-enabled model runs.
 - The repo is intentionally optimized for `make + systemd` as the primary operator flow.
 
 ## Troubleshooting
@@ -491,12 +526,12 @@ make logs MODEL=<name>
 or
 
 ```bash
-journalctl --user -u llamacpp-model@<name>.service -f
+journalctl --user -u vllm-model@<name>.service -f
 ```
 
 The `sample` command already waits for `GET /health` before sending the request.
 
-### A model file was downloaded but start fails
+### A model snapshot was downloaded but start fails
 
 Run:
 
@@ -507,19 +542,19 @@ make show MODEL=<name>
 and confirm:
 
 - `HF_REPO`
-- `HF_FILE`
 - `HF_PATTERN`
-- `LOCAL_FILE`
+- `LOCAL_PATH`
+- `ENTRYPOINT`
 
-all match the files present under `models/<name>/`.
+match the files present under `models/<name>/`.
 
 ### GPU mode is unstable or OOMs
 
-Lower the offload and batch settings:
+Lower the cache pressure and concurrency:
 
 ```bash
-make configure MODEL=coding DEVICE=gpu GPU_LAYERS=20 GPU_BATCH=256 GPU_UBATCH=128
-make restart MODEL=coding
+make configure MODEL=dense GPU_MEMORY_UTILIZATION=0.72 MAX_NUM_SEQS=4 MAX_NUM_BATCHED_TOKENS=4096
+make restart MODEL=dense
 ```
 
 ### The units do not refresh after changes
@@ -531,11 +566,12 @@ make systemd-install
 systemctl --user daemon-reload
 ```
 
-## License and contribution note
+## Contribution note
 
-This repository is structured like an operator toolkit. If you extend it, prefer:
+This repository is structured like an operator toolkit. If you extend it,
+prefer:
 
 - tracked defaults in `config/`
 - mutable machine-specific state in `runtime/`
 - thin `make` targets over direct one-off shell use
-- separate commits by concern using conventional commit messages
+- separate commits by concern
